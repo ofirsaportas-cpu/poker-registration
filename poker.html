@@ -1,0 +1,1029 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ניהול פוקר</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; font-family: 'Heebo', sans-serif; background: #0a0a0a; color: #f0f0f0; direction: rtl; -webkit-font-smoothing: antialiased; }
+    #root { min-height: 100vh; }
+    input, select, button, textarea { font-family: 'Heebo', sans-serif; }
+    input[type="time"]::-webkit-calendar-picker-indicator,
+    input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(1) opacity(0.4); }
+    ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: #111; } ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+    @keyframes shake { 0%,100%{transform:translateX(0)} 20%{transform:translateX(-8px)} 40%{transform:translateX(8px)} 60%{transform:translateX(-5px)} 80%{transform:translateX(5px)} }
+    @keyframes fadeIn { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
+    @keyframes slideDown { from{opacity:0;transform:translateY(-8px)} to{opacity:1;transform:translateY(0)} }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.45} }
+    .fade-in { animation: fadeIn 0.25s ease forwards; }
+    .slide-down { animation: slideDown 0.2s ease forwards; }
+    .pulse { animation: pulse 1.5s ease-in-out infinite; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useCallback, useMemo } = React;
+
+/* ═══════════════════════════════════════════════════════
+   STORAGE
+═══════════════════════════════════════════════════════ */
+function safeGet(key, fallback) {
+  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }
+  catch { return fallback; }
+}
+function safeSet(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} }
+
+const DEFAULT_SETTINGS = {
+  groupName: 'חבורת הפוקר', recurringDay: 3, defaultTime: '21:00',
+  defaultLocation: '', defaultMaxSeats: 9,
+};
+
+const DB = {
+  getEvents:    ()  => safeGet('poker_events', []),
+  saveEvents:   (v) => safeSet('poker_events', v),
+  getSettings:  ()  => ({ ...DEFAULT_SETTINGS, ...safeGet('poker_settings', {}) }),
+  saveSettings: (v) => safeSet('poker_settings', v),
+  getPlayer:    ()  => safeGet('poker_player', null),
+  savePlayer:   (v) => safeSet('poker_player', v),
+  clearPlayer:  ()  => localStorage.removeItem('poker_player'),
+  // Global list of regular players: [{ name, phone }]
+  getRegulars:  ()  => safeGet('poker_regulars', []),
+  saveRegulars: (v) => safeSet('poker_regulars', v),
+};
+
+/* ═══════════════════════════════════════════════════════
+   DATES & ID
+═══════════════════════════════════════════════════════ */
+const DAYS_HE   = ['ראשון','שני','שלישי','רביעי','חמישי','שישי','שבת'];
+const MONTHS_HE = ['ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
+
+function genId()  { return Math.random().toString(36).slice(2,9) + Date.now().toString(36); }
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+function formatDate(ds) {
+  if (!ds) return '';
+  const d = new Date(ds + 'T00:00:00');
+  return `יום ${DAYS_HE[d.getDay()]}, ${d.getDate()} ב${MONTHS_HE[d.getMonth()]} ${d.getFullYear()}`;
+}
+function nextWeekday(day) {
+  const t = new Date(); t.setHours(0,0,0,0);
+  let diff = (day - t.getDay() + 7) % 7;
+  if (diff === 0) diff = 7;
+  t.setDate(t.getDate() + diff);
+  return `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,'0')}-${String(t.getDate()).padStart(2,'0')}`;
+}
+function isPast(ds) { return ds ? new Date(ds+'T23:59:59') < new Date() : false; }
+function daysLabel(ds) {
+  if (!ds) return '';
+  const t = new Date(); t.setHours(0,0,0,0);
+  const diff = Math.round((new Date(ds+'T00:00:00') - t) / 86400000);
+  if (diff < 0) return 'עבר';
+  if (diff === 0) return 'היום!';
+  if (diff === 1) return 'מחר';
+  return `בעוד ${diff} ימים`;
+}
+
+/* ═══════════════════════════════════════════════════════
+   CONSTANTS
+═══════════════════════════════════════════════════════ */
+const STATUS_META = {
+  'מגיע':         { color:'#27ae60', bg:'#0a2e16', border:'#1a5e30', emoji:'✓' },
+  'לא מגיע':      { color:'#c0392b', bg:'#2e0a0a', border:'#5e1a1a', emoji:'✕' },
+  'אולי':         { color:'#e67e22', bg:'#2e1c00', border:'#5e3a00', emoji:'?' },
+  'ממתין לאישור': { color:'#888',    bg:'#1c1c1c', border:'#333',    emoji:'⏳' },
+};
+const ALL_STATUSES = ['מגיע','לא מגיע','אולי','ממתין לאישור'];
+
+function getConfirmed(ev) {
+  return ev.registrations
+    .filter(r => r.status === 'מגיע')
+    .sort((a,b) => (a.joinedAt||0)-(b.joinedAt||0))
+    .slice(0, ev.maxSeats);
+}
+function getWaitlist(ev) {
+  return ev.registrations
+    .filter(r => r.status === 'מגיע')
+    .sort((a,b) => (a.joinedAt||0)-(b.joinedAt||0))
+    .slice(ev.maxSeats);
+}
+
+/* helper: build auto-registrations from global regulars list,
+   skipping anyone already in `existingRegs` by name            */
+function buildRegularRegs(existingRegs = []) {
+  const existingNames = new Set(existingRegs.map(r => r.name));
+  return DB.getRegulars()
+    .filter(p => !existingNames.has(p.name))
+    .map(p => ({
+      id: genId(), name: p.name, phone: p.phone || '',
+      status: 'ממתין לאישור', isRegular: true, joinedAt: Date.now(),
+    }));
+}
+
+/* ═══════════════════════════════════════════════════════
+   SHARED STYLES
+═══════════════════════════════════════════════════════ */
+const inputSt = {
+  background:'#0f0f0f', border:'1px solid #2a2a2a', borderRadius:9,
+  padding:'11px 13px', color:'#f0f0f0', fontSize:15, outline:'none',
+  width:'100%', boxSizing:'border-box',
+};
+const btnGold  = { padding:'11px 22px', background:'#c9a84c', color:'#0a0a0a', border:'none', borderRadius:10, fontSize:14, fontWeight:700, cursor:'pointer' };
+const btnGhost = { padding:'10px 16px', background:'transparent', color:'#777', border:'1px solid #2a2a2a', borderRadius:10, fontSize:14, cursor:'pointer' };
+const btnDark  = { padding:'10px 16px', background:'#1a1a1a', color:'#d0d0d0', border:'1px solid #252525', borderRadius:10, fontSize:14, cursor:'pointer' };
+const labelSt  = { display:'block', color:'#666', fontSize:13, fontWeight:500, marginBottom:6 };
+
+/* ═══════════════════════════════════════════════════════
+   ATOM COMPONENTS
+═══════════════════════════════════════════════════════ */
+function Pill({ color, bg, children }) {
+  return <span style={{ background:bg, color, padding:'3px 10px', borderRadius:20, fontSize:12, fontWeight:600 }}>{children}</span>;
+}
+
+function StatusBadge({ status }) {
+  const m = STATUS_META[status] || STATUS_META['ממתין לאישור'];
+  return <span style={{ background:m.bg, color:m.color, padding:'3px 10px', borderRadius:20, fontSize:12, fontWeight:600, whiteSpace:'nowrap' }}>{status}</span>;
+}
+
+function Modal({ onClose, children }) {
+  return (
+    <div onClick={e => e.target===e.currentTarget && onClose()} style={{
+      position:'fixed', inset:0, background:'rgba(0,0,0,0.82)',
+      display:'flex', alignItems:'center', justifyContent:'center',
+      zIndex:1000, padding:16, backdropFilter:'blur(4px)',
+    }}>
+      <div className="slide-down" style={{ background:'#141414', border:'1px solid #252525', borderRadius:18, padding:28, width:'100%', maxWidth:440, direction:'rtl' }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, children }) {
+  return <div style={{ marginBottom:16 }}><label style={labelSt}>{label}</label>{children}</div>;
+}
+
+function SectionHead({ title, color }) {
+  return <div style={{ color, fontSize:13, fontWeight:600, marginBottom:7, marginTop:14 }}>{title}</div>;
+}
+
+/* ═══════════════════════════════════════════════════════
+   POKER TABLE  (SVG)
+═══════════════════════════════════════════════════════ */
+function PokerTable({ registrations, maxSeats }) {
+  const coming    = registrations.filter(r=>r.status==='מגיע').sort((a,b)=>(a.joinedAt||0)-(b.joinedAt||0));
+  const seated    = coming.slice(0, maxSeats);
+  const waitlist  = coming.slice(maxSeats);
+  const maybe     = registrations.filter(r=>r.status==='אולי');
+  const notComing = registrations.filter(r=>r.status==='לא מגיע');
+
+  const W=560, H=330, cx=280, cy=163, rx=190, ry=112, SR=28;
+
+  const seats = Array.from({ length: maxSeats }, (_,i) => {
+    const a = (2*Math.PI*i)/maxSeats - Math.PI/2;
+    return { x: cx + rx*Math.cos(a), y: cy + ry*Math.sin(a) };
+  });
+
+  function initials(name) {
+    if (!name) return '?';
+    const p = name.trim().split(' ');
+    return p.length===1 ? p[0].slice(0,2) : p[0][0] + p[p.length-1][0];
+  }
+  function shortName(name) {
+    if (!name) return '';
+    const w = name.trim().split(' ')[0];
+    return w.length<=7 ? w : w.slice(0,6)+'…';
+  }
+
+  return (
+    <div>
+      <div style={{ overflowX:'auto' }}>
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', maxWidth:W, display:'block', margin:'0 auto' }}>
+          <defs>
+            <radialGradient id="felt" cx="50%" cy="40%">
+              <stop offset="0%"   stopColor="#1e5534"/>
+              <stop offset="65%"  stopColor="#174426"/>
+              <stop offset="100%" stopColor="#0d2e18"/>
+            </radialGradient>
+            <filter id="tshadow">
+              <feDropShadow dx="0" dy="5" stdDeviation="10" floodColor="#000" floodOpacity="0.7"/>
+            </filter>
+          </defs>
+          <ellipse cx={cx} cy={cy} rx={rx+16} ry={ry+12} fill="#2a1a0a" filter="url(#tshadow)"/>
+          <ellipse cx={cx} cy={cy} rx={rx}    ry={ry}    fill="url(#felt)"/>
+          <ellipse cx={cx} cy={cy} rx={rx-14} ry={ry-9}  fill="none" stroke="rgba(255,255,255,0.04)" strokeWidth={1.5}/>
+          <text x={cx} y={cy+6} textAnchor="middle" fill="rgba(255,255,255,0.06)" fontSize={18} fontFamily="serif">♠ ♥ ♦ ♣</text>
+
+          {seats.map((pos,i) => {
+            const player = seated[i];
+            return (
+              <g key={i}>
+                <circle cx={pos.x} cy={pos.y+3} r={SR} fill="rgba(0,0,0,0.35)"/>
+                <circle cx={pos.x} cy={pos.y}   r={SR}
+                  fill={player ? '#1a3d25' : '#111'}
+                  stroke={player ? '#27ae60' : '#252525'}
+                  strokeWidth={player ? 2.5 : 1.5}
+                />
+                {player ? (
+                  <>
+                    <text x={pos.x} y={pos.y+5} textAnchor="middle" fill="#f0f0f0" fontSize={12} fontWeight="700" fontFamily="Heebo,sans-serif">{initials(player.name)}</text>
+                    <text x={pos.x} y={pos.y+SR+14} textAnchor="middle" fill="#bbb" fontSize={10} fontFamily="Heebo,sans-serif">{shortName(player.name)}</text>
+                    {player.isRegular && <text x={pos.x+SR-5} y={pos.y-SR+10} textAnchor="middle" fill="#c9a84c" fontSize={11}>★</text>}
+                  </>
+                ) : (
+                  <text x={pos.x} y={pos.y+5} textAnchor="middle" fill="#2a2a2a" fontSize={18}>+</text>
+                )}
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+
+      {maybe.length>0 && (
+        <div style={{ marginTop:16 }}>
+          <div style={{ color:'#e67e22', fontSize:13, fontWeight:600, marginBottom:6 }}>אולי ({maybe.length})</div>
+          <div style={{ display:'flex', flexWrap:'wrap', gap:6 }}>
+            {maybe.map(r=>(
+              <span key={r.id} style={{ background:'#2e1c00', color:'#e67e22', border:'1px solid #5e3a00', borderRadius:20, padding:'4px 12px', fontSize:13, opacity:0.8 }}>
+                {r.name}{r.isRegular?' ★':''}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+      {waitlist.length>0 && (
+        <div style={{ marginTop:16 }}>
+          <div style={{ color:'#c0392b', fontSize:13, fontWeight:600, marginBottom:6 }}>📋 רשימת המתנה ({waitlist.length})</div>
+          <div style={{ display:'flex', flexWrap:'wrap', gap:6 }}>
+            {waitlist.map((r,i)=>(
+              <span key={r.id} style={{ background:'#2e0a0a', color:'#c0392b', border:'1px solid #5e1a1a', borderRadius:20, padding:'4px 12px', fontSize:13 }}>
+                #{i+1} {r.name}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+      {notComing.length>0 && (
+        <div style={{ marginTop:16 }}>
+          <div style={{ color:'#444', fontSize:13, fontWeight:600, marginBottom:6 }}>לא מגיעים ({notComing.length})</div>
+          <div style={{ display:'flex', flexWrap:'wrap', gap:6 }}>
+            {notComing.map(r=>(
+              <span key={r.id} style={{ background:'#111', color:'#555', border:'1px solid #1e1e1e', borderRadius:20, padding:'4px 12px', fontSize:13 }}>
+                {r.name}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════
+   EVENT FORM
+═══════════════════════════════════════════════════════ */
+function EventForm({ type, event, settings, onSave, onClose }) {
+  const [form, setForm] = useState({
+    type,
+    date:     event?.date     || (type==='recurring' ? nextWeekday(settings.recurringDay??3) : todayStr()),
+    time:     event?.time     || settings.defaultTime     || '21:00',
+    location: event?.location || settings.defaultLocation || '',
+    maxSeats: event?.maxSeats ?? settings.defaultMaxSeats ?? 9,
+  });
+  const [errors, setErrors] = useState({});
+
+  const set = (k,v) => { setForm(f=>({...f,[k]:v})); setErrors(e=>({...e,[k]:undefined})); };
+
+  const submit = e => {
+    e.preventDefault();
+    const errs = {};
+    if (!form.date) errs.date='נא לבחור תאריך';
+    if (!form.time) errs.time='נא לבחור שעה';
+    if (!form.maxSeats||form.maxSeats<2) errs.maxSeats='מינימום 2';
+    if (Object.keys(errs).length) { setErrors(errs); return; }
+    onSave({ ...form, maxSeats:Number(form.maxSeats) });
+  };
+
+  const iSt = k => ({ ...inputSt, borderColor: errors[k] ? '#8b2020' : '#2a2a2a' });
+
+  return (
+    <Modal onClose={onClose}>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:22 }}>
+        <h2 style={{ color:'#f0f0f0', fontSize:19, fontWeight:700, margin:0 }}>
+          {event ? 'עריכת משחק' : type==='recurring' ? '↺ משחק שבועי' : '✦ משחק חד-פעמי'}
+        </h2>
+        <button onClick={onClose} style={{ background:'none', border:'none', color:'#555', fontSize:22, cursor:'pointer' }}>✕</button>
+      </div>
+      <form onSubmit={submit}>
+        <Field label="תאריך">
+          <input type="date" value={form.date} onChange={e=>set('date',e.target.value)} style={iSt('date')}/>
+          {errors.date && <p style={{ color:'#c0392b', fontSize:12, marginTop:4 }}>{errors.date}</p>}
+        </Field>
+        <div style={{ display:'flex', gap:12 }}>
+          <div style={{ flex:1 }}>
+            <Field label="שעת התחלה">
+              <input type="time" value={form.time} onChange={e=>set('time',e.target.value)} style={iSt('time')}/>
+            </Field>
+          </div>
+          <div style={{ flex:1 }}>
+            <Field label="מספר מקומות">
+              <input type="number" min="2" max="20" value={form.maxSeats} onChange={e=>set('maxSeats',e.target.value)} style={iSt('maxSeats')}/>
+            </Field>
+          </div>
+        </div>
+        <Field label="מיקום">
+          <input type="text" value={form.location} onChange={e=>set('location',e.target.value)} placeholder="לדוגמה: בית של יוסי" style={inputSt}/>
+        </Field>
+        <div style={{ display:'flex', gap:10, marginTop:8 }}>
+          <button type="submit" style={btnGold}>{event ? 'שמור שינויים' : 'צור משחק'}</button>
+          <button type="button" onClick={onClose} style={btnGhost}>ביטול</button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════
+   ADMIN LOGIN
+═══════════════════════════════════════════════════════ */
+function AdminLogin({ onLogin, correctPassword }) {
+  const [input,    setInput]    = useState('');
+  const [error,    setError]    = useState('');
+  const [shaking,  setShaking]  = useState(false);
+
+  const submit = e => {
+    e.preventDefault();
+    if (input===correctPassword) { onLogin(); return; }
+    setError('סיסמה שגויה');
+    setShaking(true); setTimeout(()=>setShaking(false),500);
+    setInput('');
+  };
+
+  return (
+    <div style={{ minHeight:'100vh', background:'radial-gradient(ellipse at center,#0f1a12 0%,#0a0a0a 70%)', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', padding:20 }}>
+      <div className="fade-in" style={{ background:'#141414', border:'1px solid #222', borderRadius:20, padding:'48px 36px', width:'100%', maxWidth:360, textAlign:'center' }}>
+        <div style={{ fontSize:42, letterSpacing:6, marginBottom:12 }}>♠♥</div>
+        <h1 style={{ color:'#c9a84c', fontSize:24, fontWeight:800, margin:'0 0 6px' }}>ניהול פוקר</h1>
+        <p style={{ color:'#555', fontSize:14, margin:'0 0 32px' }}>כניסה לאזור הניהול</p>
+        <form onSubmit={submit}>
+          <input
+            type="password" inputMode="numeric" value={input}
+            onChange={e=>{ setInput(e.target.value); setError(''); }}
+            placeholder="••••" autoFocus
+            style={{ ...inputSt, textAlign:'center', letterSpacing:8, fontSize:22, padding:'14px', border:`2px solid ${error?'#8b2020':'#2a2a2a'}`, animation:shaking?'shake 0.5s':'none' }}
+          />
+          {error && <p style={{ color:'#c0392b', fontSize:13, marginTop:8 }}>{error}</p>}
+          <button type="submit" disabled={!input} style={{ ...btnGold, width:'100%', marginTop:14, padding:'14px', fontSize:16, opacity:input?1:0.4 }}>
+            כניסה
+          </button>
+        </form>
+        <p style={{ color:'#333', fontSize:12, marginTop:24 }}>שחקנים — השתמשו בקישור ההרשמה שקיבלתם</p>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════
+   ADMIN DASHBOARD
+═══════════════════════════════════════════════════════ */
+function AdminDashboard({ events, settings, onSaveEvents, onSaveSettings, onLogout }) {
+  const [showForm,     setShowForm]     = useState(false);
+  const [formType,     setFormType]     = useState('recurring');
+  const [editEvent,    setEditEvent]    = useState(null);
+  const [expandedId,   setExpandedId]   = useState(null);
+  const [expandTab,    setExpandTab]    = useState('players');
+  const [addToId,      setAddToId]      = useState(null);
+  const [newName,      setNewName]      = useState('');
+  const [newPhone,     setNewPhone]     = useState('');
+  const [newSt,        setNewSt]        = useState('מגיע');
+  const [copiedId,     setCopiedId]     = useState(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [settForm,     setSettForm]     = useState(settings);
+  const [showPast,     setShowPast]     = useState(false);
+
+  const upcoming = events.filter(e=>!isPast(e.date)).sort((a,b)=>new Date(a.date)-new Date(b.date));
+  const past     = events.filter(e=> isPast(e.date)).sort((a,b)=>new Date(b.date)-new Date(a.date));
+
+  /* ── Event CRUD ─────────────────────────────────────── */
+  const openCreate = type => { setFormType(type); setEditEvent(null); setShowForm(true); };
+  const openEdit   = ev   => { setFormType(ev.type); setEditEvent(ev); setShowForm(true); };
+
+  const handleSaveEvent = formData => {
+    let next;
+    if (editEvent) {
+      // Editing: keep existing registrations, only update meta fields
+      next = events.map(e => e.id===editEvent.id ? { ...e, ...formData } : e);
+    } else {
+      // Creating: auto-add ALL regular players (weekly AND one-time)
+      const autoRegs = buildRegularRegs([]);
+      next = [...events, { id:genId(), ...formData, registrations:autoRegs }];
+    }
+    onSaveEvents(next);
+    setShowForm(false); setEditEvent(null);
+  };
+
+  const delEvent = id => {
+    if (!confirm('למחוק את המשחק? פעולה זו אינה הפיכה.')) return;
+    onSaveEvents(events.filter(e=>e.id!==id));
+    if (expandedId===id) setExpandedId(null);
+  };
+
+  /* ── Player management ──────────────────────────────── */
+  const mutEvent = (id, fn) => onSaveEvents(events.map(e=>e.id===id ? fn(e) : e));
+
+  const addPlayer = evId => {
+    if (!newName.trim()) return;
+    const reg = { id:genId(), name:newName.trim(), phone:newPhone.trim(), status:newSt, isRegular:false, joinedAt:Date.now() };
+    mutEvent(evId, e=>({ ...e, registrations:[...e.registrations, reg] }));
+    setNewName(''); setNewPhone(''); setNewSt('מגיע'); setAddToId(null);
+  };
+
+  const delPlayer = (evId, pid) => mutEvent(evId, e=>({ ...e, registrations:e.registrations.filter(r=>r.id!==pid) }));
+
+  const changeStatus = (evId, pid, st) => mutEvent(evId, e=>({
+    ...e, registrations: e.registrations.map(r=>r.id===pid ? {...r, status:st} : r)
+  }));
+
+  /* ── Toggle "שחקן קבוע" ─────────────────────────────
+     Updates the player's isRegular flag in this event AND
+     adds/removes them from the global regulars list so they
+     appear automatically in every future game.              */
+  const toggleRegular = (evId, pid) => mutEvent(evId, e => {
+    const target = e.registrations.find(r=>r.id===pid);
+    if (!target) return e;
+    const nowReg = !target.isRegular;
+    const regulars = DB.getRegulars();
+    if (nowReg) {
+      // Add to global list (avoid duplicates by name)
+      if (!regulars.some(p=>p.name===target.name)) {
+        DB.saveRegulars([...regulars, { name:target.name, phone:target.phone||'' }]);
+      }
+    } else {
+      // Remove from global list
+      DB.saveRegulars(regulars.filter(p=>p.name!==target.name));
+    }
+    return { ...e, registrations: e.registrations.map(r=>r.id===pid ? {...r, isRegular:nowReg} : r) };
+  });
+
+  /* ── Link copy ───────────────────────────────────────── */
+  const copyLink = evId => {
+    const base = location.origin + location.pathname;
+    const url  = evId ? `${base}?event=${evId}` : `${base}?player=1`;
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(url)
+        .then(()=>{ setCopiedId(evId||'_g'); setTimeout(()=>setCopiedId(null),2500); })
+        .catch(()=>alert('קישור: '+url));
+    } else {
+      alert('קישור: '+url);
+    }
+  };
+
+  /* ── Settings ─────────────────────────────────────────── */
+  const saveSett = () => { onSaveSettings(settForm); setShowSettings(false); };
+
+  /* ── Regulars count (for badge in header) ─────────────── */
+  const regularsCount = DB.getRegulars().length;
+
+  /* ── Player row ──────────────────────────────────────────
+     The star (★) button toggles "שחקן קבוע":
+     • Gold filled  = marked as regular (will auto-join future games)
+     • Dim outline  = not regular                                     */
+  const playerRow = (ev, reg, note) => {
+    const sm = STATUS_META[reg.status] || STATUS_META['ממתין לאישור'];
+    return (
+      <div key={reg.id} style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap', padding:'9px 11px', background:'#0f0f0f', borderRadius:8, marginBottom:5, borderRight:`3px solid ${sm.color}` }}>
+        <div style={{ flex:1, minWidth:80 }}>
+          <span style={{ color:'#f0f0f0', fontWeight:600, fontSize:14 }}>{reg.name}</span>
+          {reg.isRegular && <span style={{ color:'#c9a84c', fontSize:11, marginRight:6 }}>★ קבוע</span>}
+          {note && <span style={{ color:'#c0392b', fontSize:11, marginRight:6 }}>({note})</span>}
+          {reg.phone && <div style={{ color:'#555', fontSize:12, marginTop:1 }}>{reg.phone}</div>}
+        </div>
+
+        {/* Status selector */}
+        <select value={reg.status} onChange={e=>changeStatus(ev.id,reg.id,e.target.value)}
+          style={{ background:sm.bg, color:sm.color, border:'none', borderRadius:6, padding:'5px 8px', fontSize:13, cursor:'pointer' }}>
+          {ALL_STATUSES.map(s=><option key={s} value={s}>{s}</option>)}
+        </select>
+
+        {/* ★  Regular toggle */}
+        <button
+          onClick={()=>toggleRegular(ev.id,reg.id)}
+          title={reg.isRegular ? 'הסר מרשימת הקבועים' : 'סמן כשחקן קבוע (יצורף אוטומטית למשחקים עתידיים)'}
+          style={{
+            background: reg.isRegular ? '#2a1e00' : 'transparent',
+            color:      reg.isRegular ? '#c9a84c' : '#383838',
+            border:    `1px solid ${reg.isRegular ? '#5a3e00' : '#252525'}`,
+            borderRadius:6, padding:'5px 9px', cursor:'pointer', fontSize:14,
+            fontWeight:700, transition:'all 0.15s',
+          }}
+        >
+          {reg.isRegular ? '★' : '☆'}
+        </button>
+
+        {/* Delete from this event */}
+        <button onClick={()=>delPlayer(ev.id,reg.id)}
+          style={{ background:'transparent', color:'#383838', border:'1px solid #252525', borderRadius:6, padding:'5px 8px', cursor:'pointer', fontSize:13 }}>
+          🗑
+        </button>
+      </div>
+    );
+  };
+
+  /* ── Event card ──────────────────────────────────────── */
+  const eventCard = (ev, isPastEv) => {
+    const confirmed = getConfirmed(ev);
+    const waitlist  = getWaitlist(ev);
+    const maybe     = ev.registrations.filter(r=>r.status==='אולי');
+    const notComing = ev.registrations.filter(r=>r.status==='לא מגיע');
+    const pending   = ev.registrations.filter(r=>r.status==='ממתין לאישור');
+    const remaining = ev.maxSeats - confirmed.length;
+    const isExp     = expandedId===ev.id;
+
+    return (
+      <div key={ev.id} style={{ background:'#141414', border:'1px solid #222', borderRadius:14, marginBottom:12, overflow:'hidden', opacity:isPastEv?0.55:1 }}>
+        {/* Header */}
+        <div onClick={()=>setExpandedId(isExp?null:ev.id)} style={{ padding:'18px 20px', cursor:'pointer' }}>
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', gap:10 }}>
+            <div style={{ flex:1 }}>
+              <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:5, flexWrap:'wrap' }}>
+                <span style={{ fontSize:11, fontWeight:700, color:ev.type==='recurring'?'#27ae60':'#8b7cc9', background:ev.type==='recurring'?'#0a2e16':'#1a1530', padding:'2px 10px', borderRadius:20 }}>
+                  {ev.type==='recurring' ? '↺ שבועי' : '✦ חד-פעמי'}
+                </span>
+                {!isPastEv && <span style={{ color:'#555', fontSize:12 }}>{daysLabel(ev.date)}</span>}
+              </div>
+              <h3 style={{ color:'#f0f0f0', fontSize:16, fontWeight:700, margin:'0 0 3px' }}>{formatDate(ev.date)}</h3>
+              <p style={{ color:'#666', fontSize:13, margin:0 }}>{ev.time} · {ev.location||'מיקום לא הוגדר'}</p>
+            </div>
+            <div style={{ textAlign:'left', flexShrink:0 }}>
+              <div style={{ color:remaining>0?'#c9a84c':'#c0392b', fontSize:21, fontWeight:800, lineHeight:1 }}>{confirmed.length}/{ev.maxSeats}</div>
+              <div style={{ color:'#555', fontSize:11, marginTop:2 }}>{remaining>0?`נותרו ${remaining}`:'מלא'}</div>
+            </div>
+          </div>
+          <div style={{ display:'flex', gap:6, marginTop:10, flexWrap:'wrap' }}>
+            {confirmed.length>0 && <Pill color="#27ae60" bg="#0a2e16">✓ {confirmed.length} מגיעים</Pill>}
+            {maybe.length>0     && <Pill color="#e67e22" bg="#2e1c00">? {maybe.length} אולי</Pill>}
+            {pending.length>0   && <Pill color="#888"    bg="#1c1c1c">⏳ {pending.length} ממתינים</Pill>}
+            {waitlist.length>0  && <Pill color="#c0392b" bg="#3a0a0a">📋 המתנה {waitlist.length}</Pill>}
+          </div>
+        </div>
+
+        {/* Actions */}
+        <div style={{ borderTop:'1px solid #1a1a1a', padding:'10px 20px', display:'flex', gap:8, flexWrap:'wrap', alignItems:'center' }}>
+          <button onClick={()=>copyLink(ev.id)} style={btnGhost}>{copiedId===ev.id?'✓ הועתק!':'🔗 העתק קישור'}</button>
+          {!isPastEv && <>
+            <button onClick={()=>openEdit(ev)} style={btnDark}>✏️ עריכה</button>
+            <button onClick={()=>{ setAddToId(ev.id); setExpandedId(ev.id); }} style={btnDark}>+ הוסף שחקן</button>
+          </>}
+          <button onClick={()=>delEvent(ev.id)} style={{ ...btnGhost, color:'#8b2020', borderColor:'#3a1010', marginRight:'auto' }}>🗑 מחק</button>
+          <button onClick={()=>setExpandedId(isExp?null:ev.id)} style={{ ...btnGhost, padding:'10px 12px' }}>{isExp?'▲':'▼'}</button>
+        </div>
+
+        {/* Expanded body */}
+        {isExp && (
+          <div style={{ borderTop:'1px solid #1a1a1a', padding:20 }}>
+            {/* Tabs */}
+            <div style={{ display:'flex', gap:4, marginBottom:16, borderBottom:'1px solid #1a1a1a', paddingBottom:10 }}>
+              {[['players','שחקנים'],['table','שולחן']].map(([t,l])=>(
+                <button key={t} onClick={()=>setExpandTab(t)} style={{ padding:'6px 16px', background:expandTab===t?'#c9a84c':'transparent', color:expandTab===t?'#0a0a0a':'#666', border:expandTab===t?'none':'1px solid #222', borderRadius:8, fontSize:13, fontWeight:600, cursor:'pointer' }}>{l}</button>
+              ))}
+            </div>
+
+            {expandTab==='table' && <PokerTable registrations={ev.registrations} maxSeats={ev.maxSeats}/>}
+
+            {expandTab==='players' && (
+              <>
+                {/* Add player form */}
+                {addToId===ev.id && (
+                  <div style={{ background:'#0f0f0f', border:'1px solid #222', borderRadius:10, padding:14, marginBottom:16 }}>
+                    <p style={{ color:'#aaa', fontSize:13, fontWeight:600, margin:'0 0 10px' }}>הוספת שחקן ידנית</p>
+                    <div style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'flex-end' }}>
+                      <input placeholder="שם מלא *" value={newName} onChange={e=>setNewName(e.target.value)}
+                        onKeyDown={e=>e.key==='Enter'&&addPlayer(ev.id)}
+                        style={{ ...inputSt, flex:2, minWidth:110 }}/>
+                      <input placeholder="טלפון" value={newPhone} onChange={e=>setNewPhone(e.target.value)}
+                        style={{ ...inputSt, flex:1, minWidth:90 }}/>
+                      <select value={newSt} onChange={e=>setNewSt(e.target.value)} style={{ ...inputSt, minWidth:110 }}>
+                        {ALL_STATUSES.map(s=><option key={s} value={s}>{s}</option>)}
+                      </select>
+                      <button onClick={()=>addPlayer(ev.id)} style={btnGold}>הוסף</button>
+                      <button onClick={()=>setAddToId(null)} style={btnGhost}>ביטול</button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Regular players hint */}
+                {regularsCount>0 && (
+                  <div style={{ background:'#1a1400', border:'1px solid #3a2e00', borderRadius:8, padding:'8px 12px', marginBottom:14, fontSize:13, color:'#c9a84c' }}>
+                    ★ {regularsCount} שחקנים קבועים — יצורפו אוטומטית לכל משחק חדש
+                  </div>
+                )}
+
+                {confirmed.length>0 && <SectionHead title={`✓ מגיעים (${confirmed.length}/${ev.maxSeats})`} color="#27ae60"/>}
+                {confirmed.map(r=>playerRow(ev,r))}
+
+                {waitlist.length>0 && <SectionHead title={`📋 רשימת המתנה (${waitlist.length})`} color="#c0392b"/>}
+                {waitlist.map((r,i)=>playerRow(ev,r,`מקום ${i+1} בהמתנה`))}
+
+                {maybe.length>0 && <SectionHead title={`? אולי (${maybe.length})`} color="#e67e22"/>}
+                {maybe.map(r=>playerRow(ev,r))}
+
+                {pending.length>0 && <SectionHead title={`⏳ ממתינים לאישור (${pending.length})`} color="#888"/>}
+                {pending.map(r=>playerRow(ev,r))}
+
+                {notComing.length>0 && <SectionHead title={`✗ לא מגיעים (${notComing.length})`} color="#444"/>}
+                {notComing.map(r=>playerRow(ev,r))}
+
+                {ev.registrations.length===0 && (
+                  <p style={{ color:'#444', textAlign:'center', padding:'24px 0', fontSize:14 }}>אין שחקנים רשומים עדיין</p>
+                )}
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  /* ── Render ───────────────────────────────────────────── */
+  return (
+    <div style={{ minHeight:'100vh', background:'#0a0a0a', direction:'rtl' }}>
+      <header style={{ background:'#111', borderBottom:'1px solid #1a1a1a', padding:'14px 20px', display:'flex', justifyContent:'space-between', alignItems:'center', position:'sticky', top:0, zIndex:50, flexWrap:'wrap', gap:10 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+          <span style={{ color:'#c9a84c', fontSize:22 }}>♠</span>
+          <div>
+            <div style={{ color:'#f0f0f0', fontWeight:800, fontSize:17 }}>{settings.groupName}</div>
+            <div style={{ color:'#555', fontSize:11 }}>לוח ניהול{regularsCount>0?` · ★ ${regularsCount} קבועים`:''}</div>
+          </div>
+        </div>
+        <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+          <button onClick={()=>copyLink(null)} style={btnGhost}>{copiedId==='_g'?'✓ הועתק!':'🔗 קישור כללי'}</button>
+          <button onClick={()=>{ setSettForm(settings); setShowSettings(true); }} style={btnDark}>⚙️ הגדרות</button>
+          <button onClick={onLogout} style={btnGhost}>יציאה</button>
+        </div>
+      </header>
+
+      <main style={{ maxWidth:820, margin:'0 auto', padding:'22px 16px' }}>
+        <div style={{ display:'flex', gap:10, marginBottom:24, flexWrap:'wrap' }}>
+          <button onClick={()=>openCreate('recurring')} style={{ ...btnGold, padding:'13px 22px', fontSize:15, fontWeight:800 }}>↺ פתח משחק שבועי</button>
+          <button onClick={()=>openCreate('oneTime')}   style={{ ...btnDark, padding:'13px 22px', fontSize:15, fontWeight:600 }}>✦ משחק חד-פעמי</button>
+        </div>
+
+        <div style={{ color:'#c9a84c', fontSize:14, fontWeight:700, marginBottom:12 }}>
+          משחקים קרובים {upcoming.length>0?`(${upcoming.length})`:''}
+        </div>
+
+        {upcoming.length===0 ? (
+          <div style={{ background:'#141414', border:'1px solid #1e1e1e', borderRadius:14, padding:'44px 24px', textAlign:'center', marginBottom:20 }}>
+            <div style={{ fontSize:32, color:'#252525', marginBottom:10 }}>♠</div>
+            <p style={{ color:'#555', fontSize:15 }}>אין משחקים קרובים</p>
+            <p style={{ color:'#3a3a3a', fontSize:13, marginTop:4 }}>לחצו על "פתח משחק שבועי" כדי להתחיל</p>
+          </div>
+        ) : upcoming.map(e=>eventCard(e,false))}
+
+        {past.length>0 && (
+          <>
+            <button onClick={()=>setShowPast(p=>!p)} style={{ ...btnGhost, marginTop:20, marginBottom:12 }}>
+              {showPast?'▲ הסתר':'▼ הצג'} משחקים שעברו ({past.length})
+            </button>
+            {showPast && past.map(e=>eventCard(e,true))}
+          </>
+        )}
+      </main>
+
+      {showForm && (
+        <EventForm type={formType} event={editEvent} settings={settings}
+          onSave={handleSaveEvent} onClose={()=>{ setShowForm(false); setEditEvent(null); }}/>
+      )}
+
+      {showSettings && (
+        <Modal onClose={()=>setShowSettings(false)}>
+          <h2 style={{ color:'#f0f0f0', fontSize:19, fontWeight:700, margin:'0 0 22px' }}>הגדרות</h2>
+          <Field label="שם הקבוצה">
+            <input value={settForm.groupName||''} onChange={e=>setSettForm(s=>({...s,groupName:e.target.value}))} style={inputSt}/>
+          </Field>
+          <Field label="יום שבועי קבוע">
+            <select value={settForm.recurringDay??3} onChange={e=>setSettForm(s=>({...s,recurringDay:Number(e.target.value)}))} style={inputSt}>
+              {['ראשון','שני','שלישי','רביעי','חמישי','שישי','שבת'].map((d,i)=><option key={i} value={i}>יום {d}</option>)}
+            </select>
+          </Field>
+          <div style={{ display:'flex', gap:12 }}>
+            <div style={{ flex:1 }}>
+              <Field label="שעת ברירת מחדל">
+                <input type="time" value={settForm.defaultTime||'21:00'} onChange={e=>setSettForm(s=>({...s,defaultTime:e.target.value}))} style={inputSt}/>
+              </Field>
+            </div>
+            <div style={{ flex:1 }}>
+              <Field label="מקסימום שחקנים">
+                <input type="number" min="2" max="20" value={settForm.defaultMaxSeats||9} onChange={e=>setSettForm(s=>({...s,defaultMaxSeats:Number(e.target.value)}))} style={inputSt}/>
+              </Field>
+            </div>
+          </div>
+          <Field label="מיקום ברירת מחדל">
+            <input value={settForm.defaultLocation||''} onChange={e=>setSettForm(s=>({...s,defaultLocation:e.target.value}))} placeholder="לדוגמה: בית של יוסי" style={inputSt}/>
+          </Field>
+          <div style={{ display:'flex', gap:10, marginTop:8 }}>
+            <button onClick={saveSett} style={btnGold}>שמור</button>
+            <button onClick={()=>setShowSettings(false)} style={btnGhost}>ביטול</button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════
+   PLAYER VIEW
+═══════════════════════════════════════════════════════ */
+function PlayerView({ events, settings, currentEventId, onSaveEvents }) {
+  const [savedPlayer, setSavedPlayer] = useState(null);
+  const [showForm,    setShowForm]    = useState(false);
+  const [regName,     setRegName]     = useState('');
+  const [regPhone,    setRegPhone]    = useState('');
+  const [regStatus,   setRegStatus]   = useState('מגיע');
+  const [regError,    setRegError]    = useState('');
+  const [submitting,  setSubmitting]  = useState(false);
+  const [justOk,      setJustOk]      = useState(false);
+  const [activeEvId,  setActiveEvId]  = useState(currentEventId||null);
+
+  useEffect(()=>{ setSavedPlayer(DB.getPlayer()); },[]);
+
+  const upcoming = useMemo(()=>events.filter(e=>!isPast(e.date)).sort((a,b)=>new Date(a.date)-new Date(b.date)),[events]);
+  const activeEv = useMemo(()=>{
+    if (activeEvId) return events.find(e=>e.id===activeEvId)||null;
+    return upcoming[0]||null;
+  },[activeEvId,events,upcoming]);
+
+  const myReg = useMemo(()=>{
+    if (!activeEv||!savedPlayer) return null;
+    return activeEv.registrations.find(r=>r.name===savedPlayer.name)||null;
+  },[activeEv,savedPlayer]);
+
+  const confirmedCount = useMemo(()=>activeEv?activeEv.registrations.filter(r=>r.status==='מגיע').length:0,[activeEv]);
+  const isFull = !!(activeEv&&confirmedCount>=activeEv.maxSeats);
+
+  const flash = () => { setJustOk(true); setTimeout(()=>setJustOk(false),3000); };
+
+  const doRegister = () => {
+    if (!regName.trim()) { setRegError('נא להזין שם'); return; }
+    if (!activeEv) return;
+    setSubmitting(true);
+    setTimeout(()=>{
+      const player = { name:regName.trim(), phone:regPhone.trim() };
+      DB.savePlayer(player); setSavedPlayer(player);
+      const finalSt = regStatus==='מגיע'&&isFull ? 'ממתין לאישור' : regStatus;
+      const reg = { id:genId(), name:player.name, phone:player.phone, status:finalSt, isRegular:false, joinedAt:Date.now() };
+      const next = events.map(e=>{
+        if (e.id!==activeEv.id) return e;
+        const idx = e.registrations.findIndex(r=>r.name===player.name);
+        if (idx>=0) return { ...e, registrations:e.registrations.map((r,i)=>i===idx?{...r,status:finalSt}:r) };
+        return { ...e, registrations:[...e.registrations, reg] };
+      });
+      onSaveEvents(next);
+      setShowForm(false); setRegName(''); setRegPhone('');
+      setSubmitting(false); flash();
+    },400);
+  };
+
+  const quickUpdate = status => {
+    if (!activeEv||!savedPlayer) return;
+    const finalSt = status==='מגיע'&&isFull ? 'ממתין לאישור' : status;
+    const next = events.map(e=>{
+      if (e.id!==activeEv.id) return e;
+      const existing = e.registrations.find(r=>r.name===savedPlayer.name);
+      if (existing) return { ...e, registrations:e.registrations.map(r=>r.name===savedPlayer.name?{...r,status:finalSt}:r) };
+      return { ...e, registrations:[...e.registrations,{ id:genId(), name:savedPlayer.name, phone:savedPlayer.phone||'', status:finalSt, isRegular:false, joinedAt:Date.now() }] };
+    });
+    onSaveEvents(next); flash();
+  };
+
+  if (upcoming.length===0) {
+    return (
+      <div style={{ minHeight:'100vh', background:'#0a0a0a', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', padding:24, textAlign:'center', direction:'rtl' }}>
+        <div style={{ fontSize:48, color:'#222', marginBottom:14 }}>♠</div>
+        <h2 style={{ color:'#f0f0f0', fontSize:22, fontWeight:700, margin:'0 0 8px' }}>{settings.groupName}</h2>
+        <p style={{ color:'#555', fontSize:15 }}>אין משחקים קרובים כרגע</p>
+        <p style={{ color:'#3a3a3a', fontSize:13, marginTop:6 }}>בדקו שוב בקרוב 🃏</p>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ minHeight:'100vh', background:'#0a0a0a', direction:'rtl' }}>
+      <div style={{ background:'linear-gradient(180deg,#111 0%,#0a0a0a 100%)', borderBottom:'1px solid #1a1a1a', padding:'18px 20px 0', textAlign:'center' }}>
+        <div style={{ fontSize:26, color:'#c9a84c', marginBottom:4 }}>♠</div>
+        <h1 style={{ color:'#f0f0f0', fontSize:19, fontWeight:800, margin:'0 0 2px' }}>{settings.groupName}</h1>
+        <p style={{ color:'#555', fontSize:13, margin:'0 0 14px' }}>הרשמה למשחק</p>
+      </div>
+
+      <div style={{ maxWidth:620, margin:'0 auto', padding:'18px 14px' }}>
+
+        {/* Event tabs */}
+        {upcoming.length>1 && (
+          <div style={{ display:'flex', gap:8, overflowX:'auto', marginBottom:14, paddingBottom:4 }}>
+            {upcoming.map(e=>(
+              <button key={e.id} onClick={()=>setActiveEvId(e.id)}
+                style={{ padding:'7px 14px', whiteSpace:'nowrap', background:activeEv?.id===e.id?'#c9a84c':'#141414', color:activeEv?.id===e.id?'#0a0a0a':'#777', border:`1px solid ${activeEv?.id===e.id?'#c9a84c':'#222'}`, borderRadius:20, fontSize:13, fontWeight:600, cursor:'pointer' }}>
+                {new Date(e.date+'T00:00:00').toLocaleDateString('he-IL',{ weekday:'short', day:'numeric', month:'short' })}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Event info */}
+        {activeEv && (
+          <div style={{ background:'#141414', border:'1px solid #1e1e1e', borderRadius:14, padding:18, marginBottom:14 }}>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', gap:10 }}>
+              <div>
+                <span style={{ color:'#555', fontSize:12, fontWeight:600 }}>{daysLabel(activeEv.date)}</span>
+                <h2 style={{ color:'#f0f0f0', fontSize:17, fontWeight:800, margin:'2px 0 5px' }}>{formatDate(activeEv.date)}</h2>
+                <p style={{ color:'#666', fontSize:13, margin:0 }}>
+                  🕘 {activeEv.time}{activeEv.location?<> · 📍 {activeEv.location}</>:''}
+                </p>
+              </div>
+              <div style={{ textAlign:'left', flexShrink:0 }}>
+                <div style={{ color:isFull?'#c0392b':'#c9a84c', fontSize:22, fontWeight:800, lineHeight:1 }}>{confirmedCount}/{activeEv.maxSeats}</div>
+                <div style={{ color:'#555', fontSize:11, marginTop:2 }}>{isFull?'אין מקום':`נותרו ${activeEv.maxSeats-confirmedCount}`}</div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Returning player */}
+        {savedPlayer && !showForm && (
+          <div className="fade-in" style={{ background:'#141414', border:'1px solid #1e1e1e', borderRadius:14, padding:18, marginBottom:14 }}>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', flexWrap:'wrap', gap:8 }}>
+              <div>
+                <p style={{ color:'#f0f0f0', fontSize:17, fontWeight:700, margin:'0 0 3px' }}>היי {savedPlayer.name} 👋</p>
+                <p style={{ color:'#666', fontSize:13, margin:0 }}>
+                  {myReg ? <>הסטטוס שלך: <StatusBadge status={myReg.status}/></> : 'טרם נרשמת למשחק הזה'}
+                </p>
+              </div>
+              <button onClick={()=>{ DB.clearPlayer(); setSavedPlayer(null); }}
+                style={{ background:'none', border:'none', color:'#444', fontSize:12, cursor:'pointer', textDecoration:'underline' }}>
+                זה לא אני
+              </button>
+            </div>
+
+            {justOk && (
+              <div style={{ marginTop:12, padding:'8px 12px', background:'#0a2e16', border:'1px solid #1a5e30', borderRadius:8, color:'#27ae60', fontSize:13, fontWeight:600 }}>
+                ✓ הסטטוס עודכן בהצלחה!
+              </div>
+            )}
+
+            <div style={{ display:'flex', gap:8, marginTop:14 }}>
+              {Object.entries(STATUS_META).slice(0,3).map(([key,meta])=>{
+                const isActive = myReg?.status===key;
+                return (
+                  <button key={key} onClick={()=>quickUpdate(key)}
+                    style={{ flex:1, padding:'12px 4px', background:isActive?meta.bg:'#0f0f0f', color:isActive?meta.color:'#666', border:`2px solid ${isActive?meta.border:'#1a1a1a'}`, borderRadius:10, fontSize:14, fontWeight:700, cursor:'pointer', transition:'all 0.15s' }}>
+                    <div style={{ fontSize:17 }}>{meta.emoji}</div>
+                    <div style={{ fontSize:12, marginTop:2 }}>{key}</div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* New player form */}
+        {(!savedPlayer||showForm) && (
+          <div className="fade-in" style={{ background:'#141414', border:'1px solid #1e1e1e', borderRadius:14, padding:18, marginBottom:14 }}>
+            {showForm&&savedPlayer && (
+              <div style={{ display:'flex', justifyContent:'space-between', marginBottom:14 }}>
+                <p style={{ color:'#f0f0f0', fontWeight:700, fontSize:15, margin:0 }}>הרשמה</p>
+                <button onClick={()=>setShowForm(false)} style={{ background:'none', border:'none', color:'#555', fontSize:20, cursor:'pointer' }}>✕</button>
+              </div>
+            )}
+            {!savedPlayer && <><p style={{ color:'#f0f0f0', fontWeight:700, fontSize:16, margin:'0 0 4px' }}>הצטרפות למשחק</p><p style={{ color:'#666', fontSize:14, margin:'0 0 14px' }}>הזינו את שמכם כדי להירשם</p></>}
+
+            <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
+              <div>
+                <label style={labelSt}>שם מלא *</label>
+                <input value={regName} onChange={e=>{ setRegName(e.target.value); setRegError(''); }}
+                  placeholder="ישראל ישראלי"
+                  style={{ ...inputSt, border:`1px solid ${regError?'#8b2020':'#2a2a2a'}` }}/>
+                {regError && <p style={{ color:'#c0392b', fontSize:12, marginTop:4 }}>{regError}</p>}
+              </div>
+              <div>
+                <label style={labelSt}>טלפון (אופציונלי)</label>
+                <input value={regPhone} onChange={e=>setRegPhone(e.target.value)} placeholder="050-0000000" type="tel" style={inputSt}/>
+              </div>
+              <div>
+                <label style={labelSt}>הגעה</label>
+                <div style={{ display:'flex', gap:8 }}>
+                  {Object.entries(STATUS_META).slice(0,3).map(([key,meta])=>(
+                    <button key={key} onClick={()=>setRegStatus(key)}
+                      style={{ flex:1, padding:'11px 4px', background:regStatus===key?meta.bg:'#0f0f0f', color:regStatus===key?meta.color:'#555', border:`2px solid ${regStatus===key?meta.border:'#1a1a1a'}`, borderRadius:10, fontSize:14, fontWeight:700, cursor:'pointer', transition:'all 0.15s' }}>
+                      {key}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {isFull&&regStatus==='מגיע' && (
+                <div style={{ padding:'9px 12px', background:'#2e0a0a', border:'1px solid #5e1a1a', borderRadius:8, color:'#e07070', fontSize:13 }}>
+                  ⚠️ המשחק מלא — תרשמו לרשימת המתנה
+                </div>
+              )}
+              <button onClick={doRegister} disabled={submitting}
+                style={{ ...btnGold, padding:'14px', fontSize:16, fontWeight:800, opacity:submitting?0.6:1 }}>
+                {submitting?'שומר...':'אישור הגעה'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {savedPlayer&&!showForm && (
+          <div style={{ textAlign:'center', marginBottom:16 }}>
+            <button onClick={()=>setShowForm(true)} style={{ background:'none', border:'none', color:'#444', fontSize:13, cursor:'pointer', textDecoration:'underline' }}>
+              להרשמה בשם אחר
+            </button>
+          </div>
+        )}
+
+        {/* Poker table */}
+        {activeEv&&activeEv.registrations.length>0 && (
+          <div style={{ background:'#141414', border:'1px solid #1e1e1e', borderRadius:14, padding:18, marginBottom:14 }}>
+            <h3 style={{ color:'#f0f0f0', fontSize:15, fontWeight:700, margin:'0 0 14px' }}>שולחן המשחק</h3>
+            <PokerTable registrations={activeEv.registrations} maxSeats={activeEv.maxSeats}/>
+          </div>
+        )}
+
+        {/* Player list */}
+        {activeEv&&activeEv.registrations.length>0 && (
+          <div style={{ background:'#141414', border:'1px solid #1e1e1e', borderRadius:14, padding:18 }}>
+            <h3 style={{ color:'#f0f0f0', fontSize:15, fontWeight:700, margin:'0 0 14px' }}>
+              כל השחקנים ({activeEv.registrations.length})
+            </h3>
+            {[...activeEv.registrations]
+              .sort((a,b)=>{ const o={'מגיע':0,'אולי':1,'ממתין לאישור':2,'לא מגיע':3}; return (o[a.status]??4)-(o[b.status]??4); })
+              .map((reg,i)=>{
+                const isMine = savedPlayer&&reg.name===savedPlayer.name;
+                return (
+                  <div key={reg.id} style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', borderRadius:9, marginBottom:5, background:isMine?'#1a1a2a':'#0f0f0f', border:`1px solid ${isMine?'#2a2a5a':'transparent'}` }}>
+                    <span style={{ color:'#444', fontSize:12, width:20, textAlign:'center', flexShrink:0 }}>{i+1}</span>
+                    <span style={{ flex:1, color:isMine?'#c9a84c':'#d0d0d0', fontSize:14, fontWeight:isMine?700:500 }}>
+                      {reg.name}
+                      {isMine&&<span style={{ color:'#c9a84c', fontSize:11, marginRight:6 }}>(אני)</span>}
+                      {reg.isRegular&&<span style={{ color:'#c9a84c', fontSize:11, marginRight:4 }}>★</span>}
+                    </span>
+                    <StatusBadge status={reg.status}/>
+                  </div>
+                );
+              })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════
+   APP  (root)
+═══════════════════════════════════════════════════════ */
+function App() {
+  const [evState,   setEvState]   = useState(null);
+  const [settState, setSettState] = useState(null);
+  const [view,      setView]      = useState('loading');
+  const [curEvId,   setCurEvId]   = useState(null);
+
+  useEffect(()=>{
+    const params = new URLSearchParams(window.location.search);
+    const evParam = params.get('event');
+    const plParam = params.get('player');
+    setEvState(DB.getEvents());
+    setSettState(DB.getSettings());
+    if (evParam)      { setCurEvId(evParam); setView('player'); }
+    else if (plParam) { setView('player'); }
+    else              { setView('adminLogin'); }
+  },[]);
+
+  const handleSaveEvents   = useCallback(next=>{ setEvState(next);   DB.saveEvents(next);   },[]);
+  const handleSaveSettings = useCallback(next=>{ setSettState(next); DB.saveSettings(next); },[]);
+
+  if (!evState||!settState) {
+    return (
+      <div style={{ minHeight:'100vh', display:'flex', alignItems:'center', justifyContent:'center', background:'#0a0a0a', color:'#555', fontSize:16 }}>
+        <span className="pulse">טוען...</span>
+      </div>
+    );
+  }
+
+  if (view==='adminLogin') return <AdminLogin onLogin={()=>setView('adminDash')} correctPassword={settState.adminPassword||'1001'}/>;
+  if (view==='adminDash')  return <AdminDashboard events={evState} settings={settState} onSaveEvents={handleSaveEvents} onSaveSettings={handleSaveSettings} onLogout={()=>setView('adminLogin')}/>;
+  if (view==='player')     return <PlayerView events={evState} settings={settState} currentEventId={curEvId} onSaveEvents={handleSaveEvents}/>;
+  return null;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
