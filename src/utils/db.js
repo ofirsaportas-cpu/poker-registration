@@ -106,9 +106,9 @@ export async function fetchCurrentGame(eventId = null) {
     return dbEventToJs(eventRes.data, regsRes.data || []);
   }
 
-  // No specific event — find the active recurring game
+  // No specific event — find the nearest upcoming game (any type)
   const [eventsRes, regsRes] = await Promise.all([
-    supabase.from('events').select('*').eq('type', 'recurring'),
+    supabase.from('events').select('*'),
     supabase.from('registrations').select('*'),
   ]);
   if (eventsRes.error || !eventsRes.data?.length) return null;
@@ -116,7 +116,7 @@ export async function fetchCurrentGame(eventId = null) {
   const all = eventsRes.data.map((e) => dbEventToJs(e, regsRes.data || []));
   all.sort((a, b) => new Date(a.date) - new Date(b.date));
 
-  // Prefer the nearest upcoming; fall back to the most recent past (will be auto-advanced)
+  // Prefer the nearest upcoming; fall back to the most recent past
   return all.find((e) => !isPast(e.date)) || all[all.length - 1];
 }
 
