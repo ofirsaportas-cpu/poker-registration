@@ -99,14 +99,17 @@ export async function fetchSettings() {
 export async function fetchCurrentGame(eventId = null) {
   if (eventId) {
     const [eventRes, regsRes] = await Promise.all([
-      supabase.from('events').select('*').eq('id', eventId).single(),
+      supabase.from('events').select('*').eq('id', eventId).limit(1),
       supabase.from('registrations').select('*').eq('event_id', eventId),
     ]);
-    if (eventRes.error || !eventRes.data) return null;
-    return dbEventToJs(eventRes.data, regsRes.data || []);
+    const eventRow = eventRes.data?.[0];
+    if (!eventRes.error && eventRow) {
+      return dbEventToJs(eventRow, regsRes.data || []);
+    }
+    // Event not found by ID — fall through to general lookup
   }
 
-  // No specific event — find the nearest upcoming game (any type)
+  // Find the nearest upcoming game (any type)
   const [eventsRes, regsRes] = await Promise.all([
     supabase.from('events').select('*'),
     supabase.from('registrations').select('*'),
