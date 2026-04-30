@@ -25,7 +25,9 @@ export function getNextWeekday(dayOfWeek) {
   if (daysUntil === 0) daysUntil = 7;
   const next = new Date(today);
   next.setDate(today.getDate() + daysUntil);
-  return next.toISOString().split('T')[0];
+  const result = toLocalDateString(next);
+  console.log(`[getNextWeekday] dayOfWeek=${dayOfWeek}, today=${toLocalDateString()}, result=${result}`);
+  return result;
 }
 
 export function toLocalDateString(date = new Date()) {
@@ -37,8 +39,11 @@ export function toLocalDateString(date = new Date()) {
 
 export function isPast(dateStr) {
   if (!dateStr) return false;
-  const d = new Date(dateStr + 'T23:59:59');
-  return d < new Date();
+  const today = toLocalDateString();
+  const result = dateStr < today;
+  // Log only when result is true — normal false cases are too frequent to log
+  if (result) console.warn(`[isPast] TRUE — date="${dateStr}" < today="${today}"`);
+  return result;
 }
 
 export function isToday(dateStr) {
