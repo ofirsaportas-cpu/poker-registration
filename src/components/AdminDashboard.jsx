@@ -1,6 +1,5 @@
 import { useState, useCallback } from 'react';
 import { generateId, formatDate, daysUntilLabel, isPast } from '../utils/dates.js';
-import { storage } from '../utils/storage.js';
 import EventForm from './EventForm.jsx';
 import PokerTable from './PokerTable.jsx';
 
@@ -22,18 +21,18 @@ const STATUSES = ['מגיע', 'לא מגיע', 'אולי', 'ממתין לאיש�
 function getConfirmed(event) {
   const coming = event.registrations
     .filter((r) => r.status === 'מגיע')
-    .sort((a, b) => (a.joinedAt || 0) - (b.joinedAt || 0));
+    .sort((a, b) => new Date(a.joinedAt || 0) - new Date(b.joinedAt || 0));
   return coming.slice(0, event.maxSeats);
 }
 
 function getWaitlist(event) {
   const coming = event.registrations
     .filter((r) => r.status === 'מגיע')
-    .sort((a, b) => (a.joinedAt || 0) - (b.joinedAt || 0));
+    .sort((a, b) => new Date(a.joinedAt || 0) - new Date(b.joinedAt || 0));
   return coming.slice(event.maxSeats);
 }
 
-export default function AdminDashboard({ events, settings, onSaveEvents, onSaveSettings, onLogout }) {
+export default function AdminDashboard({ events = [], settings, players = [], onSaveEvents, onSaveSettings, onSavePlayers, onLogout }) {
   const [showEventForm, setShowEventForm] = useState(false);
   const [formType, setFormType] = useState('recurring');
   const [editingEvent, setEditingEvent] = useState(null);
@@ -51,7 +50,6 @@ export default function AdminDashboard({ events, settings, onSaveEvents, onSaveS
 
   // ─── Players management state ─────────────────────────────────────────────
   const [activeTab, setActiveTab] = useState('events');
-  const [players, setPlayers] = useState(() => storage.getPlayers());
   const [addingPlayer, setAddingPlayer] = useState(false);
   const [newPlayerName, setNewPlayerName] = useState('');
   const [newPlayerPhone, setNewPlayerPhone] = useState('');
@@ -83,14 +81,14 @@ export default function AdminDashboard({ events, settings, onSaveEvents, onSaveS
     if (editingEvent) {
       next = events.map((e) => (e.id === editingEvent.id ? { ...e, ...formData } : e));
     } else {
-      const regularPlayers = storage.getPlayers().filter((p) => p.isRegular);
+      const regularPlayers = players.filter((p) => p.isRegular);
       const autoRegs = regularPlayers.map((p) => ({
         id: generateId(),
         name: p.name,
         phone: p.phone || '',
         status: 'ממתין לאישור',
         isRegular: true,
-        joinedAt: Date.now(),
+        joinedAt: new Date().toISOString(),
       }));
       next = [
         ...events,
@@ -104,7 +102,7 @@ export default function AdminDashboard({ events, settings, onSaveEvents, onSaveS
     onSaveEvents(next);
     setShowEventForm(false);
     setEditingEvent(null);
-  }, [editingEvent, events, onSaveEvents]);
+  }, [editingEvent, events, players, onSaveEvents]);
 
   const handleDeleteEvent = (id) => {
     if (!window.confirm('למחוק את המשחק? פעולה זו אינה הפיכה.')) return;
@@ -124,13 +122,11 @@ export default function AdminDashboard({ events, settings, onSaveEvents, onSaveS
     const playerPhone = newPhone.trim();
 
     if (newIsRegular) {
-      const allPlayers = storage.getPlayers();
-      const exists = allPlayers.find((p) => p.name === playerName);
+      const exists = players.find((p) => p.name === playerName);
       const updatedPlayers = exists
-        ? allPlayers.map((p) => p.name === playerName ? { ...p, isRegular: true } : p)
-        : [...allPlayers, { id: generateId(), name: playerName, phone: playerPhone, isRegular: true }];
-      storage.setPlayers(updatedPlayers);
-      setPlayers(updatedPlayers);
+        ? players.map((p) => p.name === playerName ? { ...p, isRegular: true } : p)
+        : [...players, { id: generateId(), name: playerName, phone: playerPhone, isRegular: true }];
+      onSavePlayers(updatedPlayers);
     }
 
     const reg = {
@@ -139,7 +135,7 @@ export default function AdminDashboard({ events, settings, onSaveEvents, onSaveS
       phone: playerPhone,
       status: newStatus,
       isRegular: newIsRegular,
-      joinedAt: Date.now(),
+      joinedAt: new Date().toISOString(),
     };
     updateEvent(eventId, (e) => ({ ...e, registrations: [...e.registrations, reg] }));
     setNewName('');
@@ -170,13 +166,11 @@ export default function AdminDashboard({ events, settings, onSaveEvents, onSaveS
       const target = e.registrations.find((r) => r.id === playerId);
       if (!target) return e;
       const nowRegular = !target.isRegular;
-      const allPlayers = storage.getPlayers();
-      const exists = allPlayers.find((p) => p.name === target.name);
+      const exists = players.find((p) => p.name === target.name);
       const updatedPlayers = exists
-        ? allPlayers.map((p) => p.name === target.name ? { ...p, isRegular: nowRegular } : p)
-        : [...allPlayers, { id: generateId(), name: target.name, phone: target.phone || '', isRegular: nowRegular }];
-      storage.setPlayers(updatedPlayers);
-      setPlayers(updatedPlayers);
+        ? players.map((p) => p.name === target.name ? { ...p, isRegular: nowRegular } : p)
+        : [...players, { id: generateId(), name: target.name, phone: target.phone || '', isRegular: nowRegular }];
+      onSavePlayers(updatedPlayers);
       return {
         ...e,
         registrations: e.registrations.map((r) =>
@@ -188,10 +182,7 @@ export default function AdminDashboard({ events, settings, onSaveEvents, onSaveS
 
   // ─── Global Players Management ────────────────────────────────────────────
 
-  const savePlayers = (updated) => {
-    setPlayers(updated);
-    storage.setPlayers(updated);
-  };
+  const savePlayers = (updated) => onSavePlayers(updated);
 
   const handleAddGlobalPlayer = () => {
     if (!newPlayerName.trim()) return;
